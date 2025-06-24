@@ -13,7 +13,7 @@ import (
 	"github.com/xconnio/wampproto-go/serializers"
 	"github.com/xconnio/wampproto-go/transports"
 	wampprotobuf "github.com/xconnio/wampproto-protobuf/go"
-	"github.com/xconnio/xconn-go/internal"
+	"github.com/xconnio/xconn-go/util"
 )
 
 type (
@@ -95,7 +95,7 @@ type RawSocketPeerConfig struct {
 }
 
 type ServerConfig struct {
-	Throttle          *internal.Throttle
+	Throttle          *util.Throttle
 	KeepAliveInterval time.Duration
 	KeepAliveTimeout  time.Duration
 }

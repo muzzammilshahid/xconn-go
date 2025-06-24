@@ -13,7 +13,7 @@ import (
 
 	"github.com/xconnio/wampproto-go/auth"
 	"github.com/xconnio/wampproto-go/transports"
-	"github.com/xconnio/xconn-go/internal"
+	"github.com/xconnio/xconn-go/util"
 )
 
 type Listener int
@@ -29,7 +29,7 @@ type Server struct {
 	router            *Router
 	wsAcceptor        *WebSocketAcceptor
 	rsAcceptor        *RawSocketAcceptor
-	throttle          *internal.Throttle
+	throttle          *util.Throttle
 	keepAliveInterval time.Duration
 	keepAliveTimeout  time.Duration
 }
