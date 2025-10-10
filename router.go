@@ -154,6 +154,11 @@ func (r *Router) ReceiveMessage(base BaseSession, msg messages.Message) error {
 }
 
 func (r *Router) EnableMetaAPI(realm string) error {
+	realmObj, ok := r.realms.Load(realm)
+	if !ok {
+		return fmt.Errorf("could not find realm: %s", realm)
+	}
+
 	metaAPI, err := newMetAPI(realm, r)
 	if err != nil {
 		return err
@@ -164,6 +169,9 @@ func (r *Router) EnableMetaAPI(realm string) error {
 	}
 
 	r.metaAPI.Store(realm, metaAPI)
+
+	realmObj.EnableMetaAPI(metaAPI)
+
 	return r.AutoDiscloseCaller(realm, true)
 }
 

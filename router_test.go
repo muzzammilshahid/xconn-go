@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xconnio/wampproto-go/util"
 
 	"github.com/xconnio/wampproto-go"
 	"github.com/xconnio/wampproto-go/messages"
@@ -283,6 +284,406 @@ func TestRouterMetaSessionGet(t *testing.T) {
 	// test err
 	respErr := session.Call(xconn.MetaProcedureSessionGet).Arg(uint64(2152454520)).Do()
 	require.Equal(t, "wamp.error.no_such_session: invalid session id", respErr.Err.Error())
+}
+
+func startRouterEnableMetaAPIAndConnectSessions(t *testing.T) (*xconn.Session, *xconn.Session) {
+	router := xconn.NewRouter()
+	require.NoError(t, router.AddRealm(realmName))
+	require.NoError(t, router.EnableMetaAPI(realmName))
+
+	session, err := xconn.ConnectInMemory(router, realmName)
+	require.NoError(t, err)
+
+	session1, err := xconn.ConnectInMemory(router, realmName)
+	require.NoError(t, err)
+
+	return session, session1
+}
+
+func TestRouterMetaRegistrationTopics(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	// Subscribe to meta topics for registration
+	registrationCreated := make(chan *xconn.Event, 1)
+	subCreate := session.Subscribe(xconn.MetaTopicRegistrationCreate, func(e *xconn.Event) {
+		registrationCreated <- e
+	}).Do()
+	require.NoError(t, subCreate.Err)
+
+	calleeAdded := make(chan *xconn.Event, 1)
+	subRegister := session.Subscribe(xconn.MetaTopicRegistrationRegister, func(e *xconn.Event) {
+		calleeAdded <- e
+	}).Do()
+	require.NoError(t, subRegister.Err)
+
+	calleeRemoved := make(chan *xconn.Event, 1)
+	subUnregister := session.Subscribe(xconn.MetaTopicRegistrationUnregister, func(e *xconn.Event) {
+		calleeRemoved <- e
+	}).Do()
+	require.NoError(t, subUnregister.Err)
+
+	registrationDeleted := make(chan *xconn.Event, 1)
+	subDelete := session.Subscribe(xconn.MetaTopicRegistrationDelete, func(e *xconn.Event) {
+		registrationDeleted <- e
+	}).Do()
+	require.NoError(t, subDelete.Err)
+
+	// Register a procedure and expect "wamp.registration.on_create" and "wamp.registration.on_register" events
+	reg := session.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, reg.Err)
+	require.Eventually(t, func() bool {
+		regCreateEvent := <-registrationCreated
+		require.Equal(t, session.ID(), regCreateEvent.ArgUInt64Or(0, 0))
+		calleeAddedEvent := <-calleeAdded
+		require.Equal(t, session.ID(), calleeAddedEvent.ArgUInt64Or(0, 0))
+		require.Equal(t, reg.ID(), calleeAddedEvent.ArgUInt64Or(1, 0))
+		return true
+	}, 1*time.Second, 50*time.Millisecond)
+
+	// Register the same procedure, expect "wamp.registration.on_register" event
+	reg1 := session1.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, reg1.Err)
+	require.Eventually(t, func() bool {
+		calleeAddedEvent := <-calleeAdded
+		require.Equal(t, session1.ID(), calleeAddedEvent.ArgUInt64Or(0, 0))
+		require.Equal(t, reg.ID(), calleeAddedEvent.ArgUInt64Or(1, 0))
+		return true
+	}, 1*time.Second, 50*time.Millisecond)
+
+	// Unregister first callee, expect "wamp.registration.on_unregister" event
+	require.NoError(t, reg.Unregister())
+	require.Eventually(t, func() bool {
+		calleeRemovedEvent := <-calleeRemoved
+		require.Equal(t, session.ID(), calleeRemovedEvent.ArgUInt64Or(0, 0))
+		require.Equal(t, reg.ID(), calleeRemovedEvent.ArgUInt64Or(1, 0))
+		return true
+	}, 1*time.Second, 50*time.Millisecond)
+
+	// Unregister second callee, expect callee "wamp.registration.on_unregister" and "wamp.registration.on_delete" events
+	require.NoError(t, reg1.Unregister())
+	require.Eventually(t, func() bool {
+		<-calleeRemoved
+		<-registrationDeleted
+		return true
+	}, 1*time.Second, 50*time.Millisecond)
+}
+
+func registerProcedures(t *testing.T, session *xconn.Session) (exactRegResp xconn.RegisterResponse,
+	prefixRegResp xconn.RegisterResponse, wcRegResp xconn.RegisterResponse) {
+	exactRegResp = session.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Do()
+	require.NoError(t, exactRegResp.Err)
+
+	prefixRegResp = session.Register("io.xconn.prefix.", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Match(wampproto.MatchPrefix).Do()
+	require.NoError(t, prefixRegResp.Err)
+
+	wcRegResp = session.Register("io.xconn.wc.*.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Match(wampproto.MatchWildcard).Do()
+	require.NoError(t, wcRegResp.Err)
+
+	return
+}
+
+func TestMetaProcedureRegistrationList(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	// Helper to call "wamp.registration.list" and decode the result
+	listRegistrations := func() map[string][]uint64 {
+		callResp := session1.Call(xconn.MetaProcedureRegistrationList).Do()
+		registrations, err := callResp.Args.Get(0)
+		require.NoError(t, err)
+		var regMap map[string][]uint64
+		require.NoError(t, registrations.Decode(&regMap))
+		return regMap
+	}
+
+	exactReg, prefixReg, wcReg := registerProcedures(t, session)
+
+	// Verify all 3 registration types are present
+	regMap := listRegistrations()
+	require.True(t, len(regMap["exact"]) > 0)
+	require.Len(t, regMap["prefix"], 1)
+	require.Len(t, regMap["wildcard"], 1)
+
+	// Unregister the prefix registration and verify it is removed
+	require.NoError(t, prefixReg.Unregister())
+	regMap = listRegistrations()
+	require.True(t, len(regMap["exact"]) > 0)
+	require.Len(t, regMap["prefix"], 0)
+	require.Len(t, regMap["wildcard"], 1)
+
+	// Unregister the exact registration and verify the count decreases
+	require.NoError(t, exactReg.Unregister())
+	regMap = listRegistrations()
+	require.Len(t, regMap["exact"], len(regMap["exact"])) // exact decreased by 1 already
+	require.Len(t, regMap["prefix"], 0)
+	require.Len(t, regMap["wildcard"], 1)
+
+	// Unregister the wildcard registration and verify it is removed
+	require.NoError(t, wcReg.Unregister())
+	regMap = listRegistrations()
+	require.Len(t, regMap["exact"], len(regMap["exact"]))
+	require.Len(t, regMap["prefix"], 0)
+	require.Len(t, regMap["wildcard"], 0)
+}
+
+func TestMetaProcedureRegistrationLookup(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	reg := session.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Do()
+	require.NoError(t, reg.Err)
+
+	// Call without argument should return error
+	callResp := session1.Call(xconn.MetaProcedureRegistrationLookup).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument")
+
+	// Call with invalid argument should return error
+	callResp = session1.Call(xconn.MetaProcedureRegistrationLookup).Arg(1).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument: value is not data string, got int8")
+
+	// Call with correct argument should return registrationID as first argument
+	callResp = session1.Call(xconn.MetaProcedureRegistrationLookup).Arg("io.xconn.test").Do()
+	require.NoError(t, callResp.Err)
+	_, err := callResp.Args.UInt64(0)
+	require.NoError(t, err)
+
+	// Unregister the procedure
+	require.NoError(t, reg.Unregister())
+
+	// Call again after unregister should return nil
+	callResp = session1.Call(xconn.MetaProcedureRegistrationLookup).Arg("io.xconn.test").Do()
+	require.NoError(t, callResp.Err)
+	require.Equal(t, nil, callResp.Args.Raw()[0])
+}
+
+func TestMetaProcedureRegistrationMatch(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	exactReg, prefixReg, wcReg := registerProcedures(t, session)
+
+	// Call without argument should return error
+	callResp := session1.Call(xconn.MetaProcedureRegistrationMatch).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument")
+
+	// Call with invalid argument should return error
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg(1).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument: value is not data string, got int8")
+
+	// Call with correct exact matching procedure should return registrationID as first argument
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.test").Do()
+	require.NoError(t, callResp.Err)
+	_, err := callResp.Args.UInt64(0)
+	require.NoError(t, err)
+
+	// Call with correct prefix matching procedure should return registrationID as first argument
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.prefix.test").Do()
+	require.NoError(t, callResp.Err)
+	_, err = callResp.Args.UInt64(0)
+	require.NoError(t, err)
+
+	// Call with correct wildcard matching procedure should return registrationID as first argument
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.wc.abc.test").Do()
+	require.NoError(t, callResp.Err)
+	_, err = callResp.Args.UInt64(0)
+	require.NoError(t, err)
+
+	// Unregister the exact procedure and call again should return nil
+	require.NoError(t, exactReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.test").Do()
+	require.NoError(t, callResp.Err)
+	require.Equal(t, nil, callResp.Args.Raw()[0])
+
+	// Unregister the prefix matching procedure and call again should return nil
+	require.NoError(t, prefixReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.prefix.test").Do()
+	require.NoError(t, callResp.Err)
+	require.Equal(t, nil, callResp.Args.Raw()[0])
+
+	// Unregister the prefix matching procedure and call again should return nil
+	require.NoError(t, wcReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationMatch).Arg("io.xconn.abc.test").Do()
+	require.NoError(t, callResp.Err)
+	require.Equal(t, nil, callResp.Args.Raw()[0])
+}
+
+func TestMetaProcedureRegistrationGet(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	exactReg, prefixReg, wcReg := registerProcedures(t, session)
+
+	// Call without argument should return error
+	callResp := session1.Call(xconn.MetaProcedureRegistrationGet).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument")
+
+	// Call with invalid argument should return error
+	callResp = session1.Call(xconn.MetaProcedureRegistrationGet).Arg("io.xconn.test").Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument: value cannot be converted to uint64, got string")
+
+	getRegistration := func(regID uint64) map[string]any {
+		callResp = session1.Call(xconn.MetaProcedureRegistrationGet).Arg(regID).Do()
+		require.NoError(t, callResp.Err)
+		registration, err := callResp.Args.Get(0)
+		require.NoError(t, err)
+		var regMap map[string]any
+		require.NoError(t, registration.Decode(&regMap))
+		return regMap
+	}
+
+	// Call with valid registrationID of exact registration
+	exactRegistraion := getRegistration(exactReg.ID())
+	regID, _ := util.AsUInt64(exactRegistraion["id"])
+	require.Equal(t, exactReg.ID(), regID)
+	require.Equal(t, wampproto.MatchExact, exactRegistraion["match"])
+	require.Equal(t, "io.xconn.test", exactRegistraion["uri"])
+
+	// Call with valid registrationID of prefix registration
+	prefixRegistraion := getRegistration(prefixReg.ID())
+	regID, _ = util.AsUInt64(prefixRegistraion["id"])
+	require.Equal(t, prefixReg.ID(), regID)
+	require.Equal(t, wampproto.MatchPrefix, prefixRegistraion["match"])
+	require.Equal(t, "io.xconn.prefix.", prefixRegistraion["uri"])
+
+	// Call with valid registrationID of wildcard registration
+	wcRegistraion := getRegistration(wcReg.ID())
+	regID, _ = util.AsUInt64(wcRegistraion["id"])
+	require.Equal(t, wcReg.ID(), regID)
+	require.Equal(t, wampproto.MatchWildcard, wcRegistraion["match"])
+	require.Equal(t, "io.xconn.wc.*.test", wcRegistraion["uri"])
+
+	// Unregister the exact procedure and call again should return error
+	require.NoError(t, exactReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationGet).Arg(exactReg.ID()).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.no_such_registration")
+
+	// Unregister the prefix matching procedure and call again should return error
+	require.NoError(t, prefixReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationGet).Arg(prefixReg.ID()).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.no_such_registration")
+
+	// Unregister the prefix matching procedure and call again should return error
+	require.NoError(t, wcReg.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationGet).Arg(wcReg.ID()).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.no_such_registration")
+}
+
+func TestMetaProcedureRegistrationListCallees(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	// Call without argument should return error
+	callResp := session1.Call(xconn.MetaProcedureRegistrationListCallees).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument")
+
+	// Call with invalid argument should return error
+	callResp = session1.Call(xconn.MetaProcedureRegistrationListCallees).Arg("io.xconn.test").Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument: value cannot be converted to uint64, got string")
+
+	regResp := session.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, regResp.Err)
+
+	// Call with valid registrationID should return one callee
+	callResp = session1.Call(xconn.MetaProcedureRegistrationListCallees).Arg(regResp.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesList, _ := callResp.Args.List(0)
+	require.Len(t, calleesList, 1)
+	callee, _ := util.AsUInt64(calleesList[0])
+	require.Equal(t, session.ID(), callee)
+
+	// Register again and call should return two callees
+	regResp2 := session1.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, regResp2.Err)
+
+	callResp = session1.Call(xconn.MetaProcedureRegistrationListCallees).Arg(regResp2.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesList, _ = callResp.Args.List(0)
+	require.Len(t, calleesList, 2)
+	callee1, _ := util.AsUInt64(calleesList[0])
+	callee2, _ := util.AsUInt64(calleesList[1])
+	require.Equal(t, session.ID(), callee1)
+	require.Equal(t, session1.ID(), callee2)
+
+	// Unregister first registration and call should return only session1 as callee
+	require.NoError(t, regResp.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationListCallees).Arg(regResp2.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesList, _ = callResp.Args.List(0)
+	require.Len(t, calleesList, 1)
+	callee, _ = util.AsUInt64(calleesList[0])
+	require.Equal(t, session1.ID(), callee)
+
+	// Unregister the last registration, the registration should be removed now
+	require.NoError(t, regResp2.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationListCallees).Arg(regResp2.ID()).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.no_such_registration")
+}
+
+func TestMetaProcedureRegistrationCountCallees(t *testing.T) {
+	session, session1 := startRouterEnableMetaAPIAndConnectSessions(t)
+
+	// Call without argument should return error
+	callResp := session1.Call(xconn.MetaProcedureRegistrationCountCallees).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument")
+
+	// Call with invalid argument should return error
+	callResp = session1.Call(xconn.MetaProcedureRegistrationCountCallees).Arg("io.xconn.test").Do()
+	require.EqualError(t, callResp.Err, "wamp.error.invalid_argument: value cannot be converted to uint64, got string")
+
+	regResp := session.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, regResp.Err)
+
+	// Call with valid registrationID should return 1 as count
+	callResp = session1.Call(xconn.MetaProcedureRegistrationCountCallees).Arg(regResp.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesCount, _ := callResp.Args.UInt64(0)
+	require.Equal(t, calleesCount, uint64(1))
+
+	// Register again and call should return 2 as count
+	regResp2 := session1.Register("io.xconn.test", func(ctx context.Context,
+		invocation *xconn.Invocation) *xconn.InvocationResult {
+		return xconn.NewInvocationResult()
+	}).Invoke(wampproto.InvokeFirst).Do()
+	require.NoError(t, regResp2.Err)
+
+	callResp = session1.Call(xconn.MetaProcedureRegistrationCountCallees).Arg(regResp2.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesCount, _ = callResp.Args.UInt64(0)
+	require.Equal(t, calleesCount, uint64(2))
+
+	// Unregister first registration and call should return only 1 as count
+	require.NoError(t, regResp.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationCountCallees).Arg(regResp2.ID()).Do()
+	require.NoError(t, callResp.Err)
+	calleesCount, _ = callResp.Args.UInt64(0)
+	require.Equal(t, calleesCount, uint64(1))
+
+	// Unregister the last registration, the registration should be removed now
+	require.NoError(t, regResp2.Unregister())
+	callResp = session1.Call(xconn.MetaProcedureRegistrationCountCallees).Arg(regResp2.ID()).Do()
+	require.EqualError(t, callResp.Err, "wamp.error.no_such_registration")
 }
 
 func TestAuthorization(t *testing.T) {

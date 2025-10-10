@@ -49,17 +49,12 @@ func (v Value) BoolOr(def bool) bool {
 }
 
 func (v Value) Int64() (int64, error) {
-	switch val := v.data.(type) {
-	case int64:
-		return val, nil
-	case int:
-		return int64(val), nil
-	case int32:
-		return int64(val), nil
-	case float64:
-		return int64(val), nil
+	val, ok := util.AsInt64(v.data)
+	if !ok {
+		return 0, fmt.Errorf("value cannot be converted to int64, got %T", v.data)
 	}
-	return 0, fmt.Errorf("value cannot be converted to int64, got %T", v.data)
+
+	return val, nil
 }
 
 func (v Value) Int64Or(def int64) int64 {
@@ -70,17 +65,12 @@ func (v Value) Int64Or(def int64) int64 {
 }
 
 func (v Value) Float64() (float64, error) {
-	switch val := v.data.(type) {
-	case float64:
-		return val, nil
-	case float32:
-		return float64(val), nil
-	case int64:
-		return float64(val), nil
-	case int:
-		return float64(val), nil
+	val, ok := util.AsFloat64(v.data)
+	if !ok {
+		return 0, fmt.Errorf("value cannot be converted to float64, got %T", v.data)
 	}
-	return 0, fmt.Errorf("value cannot be converted to float64, got %T", v.data)
+
+	return val, nil
 }
 
 func (v Value) Float64Or(def float64) float64 {
@@ -91,27 +81,12 @@ func (v Value) Float64Or(def float64) float64 {
 }
 
 func (v Value) UInt64() (uint64, error) {
-	switch val := v.data.(type) {
-	case uint64:
-		return val, nil
-	case uint:
-		return uint64(val), nil
-	case uint32:
-		return uint64(val), nil
-	case int64:
-		if val >= 0 {
-			return uint64(val), nil
-		}
-	case int:
-		if val >= 0 {
-			return uint64(val), nil
-		}
-	case float64:
-		if val >= 0 {
-			return uint64(val), nil
-		}
+	value, ok := util.AsUInt64(v.data)
+	if !ok {
+		return 0, fmt.Errorf("value cannot be converted to uint64, got %T", v.data)
 	}
-	return 0, fmt.Errorf("value cannot be converted to uint64, got %T", v.data)
+
+	return value, nil
 }
 
 func (v Value) UInt64Or(def uint64) uint64 {

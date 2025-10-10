@@ -34,3 +34,5 @@ require (
 	golang.org/x/time v0.12.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/xconnio/wampproto-go => /home/muzzammil/scm/xconnio/wampproto-go

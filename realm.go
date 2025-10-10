@@ -254,3 +254,43 @@ func (r *Realm) Close() {
 		return true
 	})
 }
+
+func (r *Realm) EnableMetaAPI(metaAPI *meta) {
+	r.dealer.EnableMetaAPI()
+	go func() {
+		for reg := range r.dealer.RegistrationCreated {
+			metaAPI.OnRegistrationCreated(reg)
+		}
+	}()
+
+	go func() {
+		for reg := range r.dealer.CalleeAdded {
+			metaAPI.OnRegistrationRegister(reg)
+		}
+	}()
+
+	go func() {
+		for reg := range r.dealer.CalleeRemoved {
+			metaAPI.OnRegistrationUnregister(reg)
+		}
+	}()
+
+	go func() {
+		for reg := range r.dealer.RegistrationDeleted {
+			metaAPI.OnRegistrationDeleted(reg)
+		}
+	}()
+}
+
+func (r *Realm) findRegistrationByID(id uint64) (*wampproto.Registration, bool) {
+	if reg, ok := r.dealer.ExactRegistrationsByID()[id]; ok {
+		return reg, true
+	}
+	if reg, ok := r.dealer.PrefixRegistrationsByID()[id]; ok {
+		return reg, true
+	}
+	if reg, ok := r.dealer.WildCardRegistrationsByID()[id]; ok {
+		return reg, true
+	}
+	return nil, false
+}

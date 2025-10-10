@@ -28,6 +28,10 @@ func main() {
 		log.Fatal(err)
 	}
 	defer r.Close()
+	err := r.EnableMetaAPI(*realm)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	server := xconn.NewServer(r, nil, nil)
 	closer, err := server.ListenAndServeWebSocket(xconn.NetworkTCP, fmt.Sprintf("%s:%d", *host, *port))

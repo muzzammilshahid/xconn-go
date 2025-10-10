@@ -602,6 +602,10 @@ func (r RegisterResponse) Unregister() error {
 	return r.registration.unregister()
 }
 
+func (r RegisterResponse) ID() uint64 {
+	return r.registration.id
+}
+
 type SubscribeResponse struct {
 	subscription *Subscription
 	Err          error

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"golang.org/x/exp/maps"
+
+	"github.com/xconnio/wampproto-go"
 	"github.com/xconnio/wampproto-go/messages"
 )
 
@@ -16,8 +19,20 @@ const (
 	MetaProcedureSessionKillByAuthRole = "wamp.session.kill_by_authrole"
 	MetaProcedureSessionKillAll        = "wamp.session.kill_all"
 
+	MetaProcedureRegistrationList         = "wamp.registration.list"
+	MetaProcedureRegistrationLookup       = "wamp.registration.lookup"
+	MetaProcedureRegistrationMatch        = "wamp.registration.match"
+	MetaProcedureRegistrationGet          = "wamp.registration.get"
+	MetaProcedureRegistrationListCallees  = "wamp.registration.list_callees"
+	MetaProcedureRegistrationCountCallees = "wamp.registration.count_callees"
+
 	MetaTopicSessionJoin  = "wamp.session.on_join"
 	MetaTopicSessionLeave = "wamp.session.on_leave"
+
+	MetaTopicRegistrationCreate     = "wamp.registration.on_create"
+	MetaTopicRegistrationRegister   = "wamp.registration.on_register"
+	MetaTopicRegistrationUnregister = "wamp.registration.on_unregister"
+	MetaTopicRegistrationDelete     = "wamp.registration.on_delete"
 )
 
 type meta struct {
@@ -48,6 +63,13 @@ func (m *meta) start() error {
 		MetaProcedureSessionKillByAuthID:   m.handleSessionKillByAuthID,
 		MetaProcedureSessionKillByAuthRole: m.handleSessionKillByAuthRole,
 		MetaProcedureSessionKillAll:        m.handleSessionKillAll,
+
+		MetaProcedureRegistrationList:         m.handleRegistrationList,
+		MetaProcedureRegistrationLookup:       m.handleRegistrationLookup,
+		MetaProcedureRegistrationMatch:        m.handleRegistrationMatch,
+		MetaProcedureRegistrationGet:          m.handleRegistrationGet,
+		MetaProcedureRegistrationListCallees:  m.handleRegistrationListCallees,
+		MetaProcedureRegistrationCountCallees: m.handleRegistrationCountCallees,
 	} {
 		response := m.session.Register(uri, handler).Do()
 		if response.Err != nil {
@@ -276,4 +298,190 @@ func contains(slice []any, val string) bool {
 		}
 	}
 	return false
+}
+
+func (m *meta) OnRegistrationCreated(reg *wampproto.Registration) {
+	var calleeSession uint64
+	for callee := range reg.Registrants {
+		calleeSession = callee
+	}
+	registrationDetails := map[string]any{
+		"id":      reg.ID,
+		"created": reg.Created,
+		"uri":     reg.Procedure,
+		"match":   reg.Match,
+		"invoke":  reg.InvocationPolicy,
+	}
+	// FIXME: use a goroutine pool
+	go func() {
+		if m.session != nil {
+			m.session.Publish(MetaTopicRegistrationCreate).Args(calleeSession, registrationDetails).Do()
+		}
+	}()
+}
+
+func (m *meta) OnRegistrationRegister(reg wampproto.RegistrationEvent) {
+	// FIXME: use a goroutine pool
+	go func() {
+		if m.session != nil {
+			m.session.Publish(MetaTopicRegistrationRegister).Args(reg.SessionID, reg.RegistrationID).Do()
+		}
+	}()
+}
+
+func (m *meta) OnRegistrationUnregister(reg wampproto.RegistrationEvent) {
+	// FIXME: use a goroutine pool
+	go func() {
+		if m.session != nil {
+			m.session.Publish(MetaTopicRegistrationUnregister).Args(reg.SessionID, reg.RegistrationID).Do()
+		}
+	}()
+}
+
+func (m *meta) OnRegistrationDeleted(reg wampproto.RegistrationEvent) {
+	// FIXME: use a goroutine pool
+	go func() {
+		if m.session != nil {
+			m.session.Publish(MetaTopicRegistrationDelete).Args(reg.SessionID, reg.RegistrationID).Do()
+		}
+	}()
+}
+
+func (m *meta) handleRegistrationList(_ context.Context, _ *Invocation) *InvocationResult {
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	registrationList := map[string]any{
+		"exact":    maps.Keys(realm.dealer.ExactRegistrationsByID()),
+		"prefix":   maps.Keys(realm.dealer.PrefixRegistrationsByID()),
+		"wildcard": maps.Keys(realm.dealer.WildCardRegistrationsByID()),
+	}
+
+	return NewInvocationResult(registrationList)
+}
+
+func (m *meta) handleRegistrationLookup(_ context.Context, invocation *Invocation) *InvocationResult {
+	if invocation.ArgsLen() < 1 {
+		return NewInvocationError("wamp.error.invalid_argument")
+	}
+
+	procedure, err := invocation.ArgString(0)
+	if err != nil {
+		return NewInvocationError("wamp.error.invalid_argument", err.Error())
+	}
+
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	reg, ok := realm.dealer.RegistrationsByProcedure()[procedure]
+	if !ok {
+		return NewInvocationResult(nil)
+	}
+
+	return NewInvocationResult(reg.ID)
+}
+
+func (m *meta) handleRegistrationMatch(_ context.Context, invocation *Invocation) *InvocationResult {
+	if invocation.ArgsLen() != 1 {
+		return NewInvocationError("wamp.error.invalid_argument")
+	}
+
+	procedure, err := invocation.ArgString(0)
+	if err != nil {
+		return NewInvocationError("wamp.error.invalid_argument", err.Error())
+	}
+
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	reg, ok := realm.dealer.MatchRegistration(procedure)
+	if !ok {
+		return NewInvocationResult(nil)
+	}
+
+	return NewInvocationResult(reg.ID)
+}
+
+func (m *meta) handleRegistrationGet(_ context.Context, invocation *Invocation) *InvocationResult {
+	if invocation.ArgsLen() != 1 {
+		return NewInvocationError("wamp.error.invalid_argument")
+	}
+
+	id, err := invocation.ArgUInt64(0)
+	if err != nil {
+		return NewInvocationError("wamp.error.invalid_argument", err.Error())
+	}
+
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	reg, ok := realm.findRegistrationByID(id)
+	if !ok {
+		return NewInvocationError("wamp.error.no_such_registration")
+	}
+
+	registrationDetails := map[string]any{
+		"id":      reg.ID,
+		"created": reg.Created,
+		"uri":     reg.Procedure,
+		"match":   reg.Match,
+		"invoke":  reg.InvocationPolicy,
+	}
+
+	return NewInvocationResult(registrationDetails)
+}
+
+func (m *meta) handleRegistrationListCallees(_ context.Context, invocation *Invocation) *InvocationResult {
+	if invocation.ArgsLen() != 1 {
+		return NewInvocationError("wamp.error.invalid_argument")
+	}
+
+	id, err := invocation.ArgUInt64(0)
+	if err != nil {
+		return NewInvocationError("wamp.error.invalid_argument", err.Error())
+	}
+
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	reg, ok := realm.findRegistrationByID(id)
+	if !ok {
+		return NewInvocationError("wamp.error.no_such_registration")
+	}
+
+	callees := maps.Keys(reg.Registrants)
+	return NewInvocationResult(callees)
+}
+
+func (m *meta) handleRegistrationCountCallees(_ context.Context, invocation *Invocation) *InvocationResult {
+	if invocation.ArgsLen() != 1 {
+		return NewInvocationError("wamp.error.invalid_argument")
+	}
+
+	id, err := invocation.ArgUInt64(0)
+	if err != nil {
+		return NewInvocationError("wamp.error.invalid_argument", err.Error())
+	}
+
+	realm, ok := m.router.realms.Load(m.realm)
+	if !ok {
+		return NewInvocationError("wamp.error.not_found", "invalid realm")
+	}
+
+	reg, ok := realm.findRegistrationByID(id)
+	if !ok {
+		return NewInvocationError("wamp.error.no_such_registration")
+	}
+
+	return NewInvocationResult(len(reg.Registrants))
 }
