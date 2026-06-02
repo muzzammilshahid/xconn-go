@@ -30,6 +30,7 @@ const (
 	TransportWebSocket
 	TransportRawSocket
 	TransportInMemory
+	TransportYamux
 )
 
 var (
@@ -1049,4 +1050,8 @@ func NewSessionDetails(
 
 type Authorizer interface {
 	Authorize(baseSession BaseSession, msg messages.Message) (bool, error)
+}
+
+type MultiplexSession interface {
+	OpenStream() (net.Conn, error)
 }

@@ -35,7 +35,7 @@ func forEachSerializer(fn func(name string, spec xconn.SerializerSpec)) {
 func connectInMemory(t *testing.T, router *xconn.Router, realm string,
 	serializer serializers.Serializer) *xconn.Session {
 	authID := fmt.Sprintf("%012x", rand.Uint64())[:12]
-	authRole := "trusted"
+	authRole := roleTrusted
 
 	base, err := xconn.ConnectInMemoryBase(router, realm, authID, authRole, serializer, 0)
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestRegisterCall(t *testing.T) {
 	forEachSerializer(func(name string, spec xconn.SerializerSpec) {
 		t.Run("With"+name, func(t *testing.T) {
 			callee, caller := connectedLocalSessions(t, spec.Serializer())
-			regResp := callee.Register("io.xconn.test",
+			regResp := callee.Register(testProcedure,
 				func(ctx context.Context, invocation *xconn.Invocation) *xconn.InvocationResult {
 					return xconn.NewInvocationResult("hello")
 				}).Do()
@@ -85,7 +85,7 @@ func TestRegisterCall(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					callResponse := caller.Call("io.xconn.test").Do()
+					callResponse := caller.Call(testProcedure).Do()
 					require.NoError(t, callResponse.Err)
 					require.NotNil(t, callResponse)
 					require.Equal(t, "hello", callResponse.ArgStringOr(0, ""))
@@ -95,7 +95,7 @@ func TestRegisterCall(t *testing.T) {
 
 			require.NoError(t, regResp.Unregister())
 
-			callResp := caller.Call("io.xconn.test").Do()
+			callResp := caller.Call(testProcedure).Do()
 			require.EqualError(t, callResp.Err, "wamp.error.no_such_procedure")
 		})
 	})
@@ -284,7 +284,7 @@ func TestCallProgressiveProgress(t *testing.T) {
 func TestInMemorySession(t *testing.T) {
 	forEachSerializer(func(name string, serializerSpec xconn.SerializerSpec) {
 		t.Run(name, func(t *testing.T) {
-			role := "trusted"
+			role := roleTrusted
 			procedure := "com.hello"
 
 			router, err := xconn.NewRouter(nil)
@@ -378,9 +378,9 @@ func TestPerformance(t *testing.T) {
 	err = router.AddRealm("realm1", &xconn.RealmConfig{})
 	require.NoError(t, err)
 
-	err = router.AddRealmRole("realm1", xconn.RealmRole{Name: "anonymous", Permissions: []xconn.Permission{{
+	err = router.AddRealmRole("realm1", xconn.RealmRole{Name: roleAnonymous, Permissions: []xconn.Permission{{
 		URI:            "",
-		MatchPolicy:    "prefix",
+		MatchPolicy:    matchPrefix,
 		AllowCall:      true,
 		AllowRegister:  true,
 		AllowPublish:   true,

@@ -2,12 +2,14 @@ package xconn
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/projectdiscovery/ratelimit"
 	log "github.com/sirupsen/logrus"
 
@@ -40,6 +42,8 @@ type Server struct {
 	keepAliveInterval time.Duration
 	keepAliveTimeout  time.Duration
 	outQueueSize      int
+	streamHandler     StreamHandler
+	connHandler       YamuxConnHandler
 }
 
 func NewServer(router *Router, authenticator auth.ServerAuthenticator, config *ServerConfig) *Server {
@@ -294,5 +298,129 @@ func (s *Server) Serve(listener net.Listener, protocol ListenerType) *Listener {
 	return &Listener{
 		closer: listener,
 		addr:   addr,
+	}
+}
+
+// SetStreamHandler registers a handler called for each non-WAMP yamux stream opened by a client.
+// The handler receives the authenticated WAMP BaseSession for that connection and the raw stream.
+func (s *Server) SetStreamHandler(handler StreamHandler) {
+	s.streamHandler = handler
+}
+
+// SetYamuxConnHandler registers a handler called once per yamux connection after WAMP authentication succeeds.
+// The ctx is cancelled when that connection closes. conn allows opening streams back to the client.
+func (s *Server) SetYamuxConnHandler(handler YamuxConnHandler) {
+	s.connHandler = handler
+}
+
+// ListenAndServeYamux starts a yamux listener. Each TCP connection is multiplexed via yamux.
+// The first stream carries WAMP and further streams are dispatched to the StreamHandler.
+func (s *Server) ListenAndServeYamux(network Network, address string) (*Listener, error) {
+	if network == NetworkUnix {
+		if err := ensureUnixSocketAvailable(address); err != nil {
+			return nil, err
+		}
+	}
+	ln, err := net.Listen(string(network), address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen: %w", err)
+	}
+
+	go s.startYamuxConnectionLoop(ln)
+	return &Listener{closer: ln, addr: ln.Addr()}, nil
+}
+
+func (s *Server) startYamuxConnectionLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			_ = ln.Close()
+			return
+		}
+		go s.HandleYamuxClient(conn)
+	}
+}
+
+// HandleYamuxClient handles a single TCP connection as a yamux session.
+func (s *Server) HandleYamuxClient(conn net.Conn) {
+	yamuxSess, err := yamux.Server(conn, nil)
+	if err != nil {
+		log.Debugf("failed to create yamux session: %v", err)
+		_ = conn.Close()
+		return
+	}
+
+	// First stream is the WAMP control stream.
+	wampStream, err := yamuxSess.Accept()
+	if err != nil {
+		log.Debugf("failed to accept WAMP stream: %v", err)
+		_ = yamuxSess.Close()
+		return
+	}
+
+	config := DefaultRawSocketServerConfig()
+	config.KeepAliveInterval = s.keepAliveInterval
+	config.KeepAliveTimeout = s.keepAliveTimeout
+	config.OutQueueSize = s.outQueueSize
+
+	base, err := s.rsAcceptor.Accept(wampStream, config)
+	if err != nil {
+		log.Debugf("failed to accept yamux WAMP stream: %v", err)
+		_ = yamuxSess.Close()
+		return
+	}
+
+	if err = s.router.AttachClient(base); err != nil {
+		log.Debugf("failed to attach yamux client: %v", err)
+		_ = yamuxSess.Close()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if s.connHandler != nil {
+		go s.connHandler(ctx, base, &YamuxClientConn{yamuxSess: yamuxSess})
+	}
+
+	if s.streamHandler != nil {
+		go s.acceptYamuxStreams(yamuxSess, base)
+	}
+
+	log.Debugf("attached yamux client %d", base.ID())
+
+	var limiter *ratelimit.Limiter
+	if s.throttle != nil {
+		limiter = s.throttle.Create()
+	}
+
+	for {
+		msg, err := base.ReadMessage()
+		if err != nil {
+			log.Tracef("failed to read yamux client message: %v", err)
+			_ = s.router.DetachClient(base)
+			break
+		}
+
+		if limiter != nil {
+			limiter.Take()
+		}
+
+		if err = s.router.ReceiveMessage(base, msg); err != nil {
+			log.Tracef("error feeding yamux client message to router: %v", err)
+		}
+	}
+
+	_ = yamuxSess.Close()
+	log.Debugf("detached yamux client %d", base.ID())
+}
+
+func (s *Server) acceptYamuxStreams(yamuxSess *yamux.Session, base BaseSession) {
+	for {
+		stream, err := yamuxSess.Accept()
+		if err != nil {
+			return
+		}
+		go s.streamHandler(base, stream)
 	}
 }

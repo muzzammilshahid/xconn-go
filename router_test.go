@@ -20,7 +20,13 @@ import (
 	"github.com/xconnio/xconn-go/auth"
 )
 
-const realmName = "test"
+const (
+	realmName     = "test"
+	roleTrusted   = "trusted"
+	roleAnonymous = "anonymous"
+	matchPrefix   = "prefix"
+	testProcedure = "io.xconn.test"
+)
 
 func TestRouterMetaKill(t *testing.T) {
 	router, err := xconn.NewRouter(nil)
@@ -76,11 +82,12 @@ func TestRouterMetaKillByAuthID(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create sessions with authid "test"
-	baseSession, err := xconn.ConnectInMemoryBase(router, realmName, "test", "trusted", &serializers.JSONSerializer{}, 0)
+	baseSession, err := xconn.ConnectInMemoryBase(router, realmName, "test", roleTrusted, &serializers.JSONSerializer{}, 0)
 	require.NoError(t, err)
 	session1 := xconn.NewSession(baseSession, baseSession.Serializer())
 
-	baseSession1, err := xconn.ConnectInMemoryBase(router, realmName, "test", "trusted", &serializers.JSONSerializer{}, 0)
+	baseSession1, err := xconn.ConnectInMemoryBase(router, realmName, "test", roleTrusted,
+		&serializers.JSONSerializer{}, 0)
 	require.NoError(t, err)
 	session2 := xconn.NewSession(baseSession1, baseSession.Serializer())
 
@@ -196,7 +203,7 @@ func TestRouterMetaSessionCount(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("CountSessionWithRoleTrusted", func(t *testing.T) {
-		resp := session.Call(xconn.MetaProcedureSessionCount).Arg([]any{"trusted"}).Do()
+		resp := session.Call(xconn.MetaProcedureSessionCount).Arg([]any{roleTrusted}).Do()
 		require.NoError(t, resp.Err)
 		require.Equal(t, uint64(2), resp.ArgUInt64Or(0, 0))
 	})
@@ -241,7 +248,7 @@ func TestRouterMetaSessionList(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("ListSessionsWithRoleTrusted", func(t *testing.T) {
-		resp := session.Call(xconn.MetaProcedureSessionList).Arg([]any{"trusted"}).Do()
+		resp := session.Call(xconn.MetaProcedureSessionList).Arg([]any{roleTrusted}).Do()
 		require.NoError(t, resp.Err)
 		ids := resp.ArgListOr(0, nil)
 		require.Len(t, ids, 2)
@@ -290,7 +297,7 @@ func TestRouterMetaSessionGet(t *testing.T) {
 	require.NoError(t, err)
 
 	expectedDetails := map[string]any{"authid": session.Details().AuthID(), "authmethod": "", "authprovider": "",
-		"authrole": "trusted", "session": session.ID(), "authextra": map[string]any{}}
+		"authrole": roleTrusted, "session": session.ID(), "authextra": map[string]any{}}
 	resp := session.Call(xconn.MetaProcedureSessionGet).Arg(session.ID()).Do()
 	require.NoError(t, resp.Err)
 	require.Equal(t, expectedDetails, resp.Args()[0])
@@ -323,26 +330,26 @@ func TestAuthorization(t *testing.T) {
 
 	t.Run("AllowRegisterCall", func(t *testing.T) {
 		addRole("registerCall", []xconn.Permission{{
-			URI:           "io.xconn.test",
+			URI:           testProcedure,
 			MatchPolicy:   wampproto.MatchExact,
 			AllowRegister: true,
 			AllowCall:     true,
 		}})
 		session := createSession("registerCall")
 
-		registerResp := session.Register("io.xconn.test",
+		registerResp := session.Register(testProcedure,
 			func(ctx context.Context, invocation *xconn.Invocation) *xconn.InvocationResult {
 				return &xconn.InvocationResult{}
 			}).Do()
 		require.NoError(t, registerResp.Err)
 
-		callResp := session.Call("io.xconn.test").Do()
+		callResp := session.Call(testProcedure).Do()
 		require.NoError(t, callResp.Err)
 
-		publishResp := session.Publish("io.xconn.test").Acknowledge(true).Do()
+		publishResp := session.Publish(testProcedure).Acknowledge(true).Do()
 		require.EqualError(t, publishResp.Err, "wamp.error.authorization_failed")
 
-		subscribeResp := session.Subscribe("io.xconn.test", func(event *xconn.Event) {}).Do()
+		subscribeResp := session.Subscribe(testProcedure, func(event *xconn.Event) {}).Do()
 		require.EqualError(t, subscribeResp.Err, "wamp.error.authorization_failed")
 	})
 
@@ -354,16 +361,16 @@ func TestAuthorization(t *testing.T) {
 		}})
 		session := createSession("publishOnly")
 
-		callResp := session.Call("io.xconn.test").Do()
+		callResp := session.Call(testProcedure).Do()
 		require.EqualError(t, callResp.Err, "wamp.error.authorization_failed")
 
-		publishResp := session.Publish("io.xconn.test").Do()
+		publishResp := session.Publish(testProcedure).Do()
 		require.NoError(t, publishResp.Err)
 
-		subscribeResp := session.Subscribe("io.xconn.test", func(event *xconn.Event) {}).Do()
+		subscribeResp := session.Subscribe(testProcedure, func(event *xconn.Event) {}).Do()
 		require.EqualError(t, subscribeResp.Err, "wamp.error.authorization_failed")
 
-		registerResp := session.Register("io.xconn.test",
+		registerResp := session.Register(testProcedure,
 			func(ctx context.Context, invocation *xconn.Invocation) *xconn.InvocationResult {
 				return &xconn.InvocationResult{}
 			}).Do()
@@ -379,19 +386,19 @@ func TestAuthorization(t *testing.T) {
 		}})
 		session := createSession("subscriberAndPublish")
 
-		registerResp := session.Register("io.xconn.test",
+		registerResp := session.Register(testProcedure,
 			func(ctx context.Context, invocation *xconn.Invocation) *xconn.InvocationResult {
 				return &xconn.InvocationResult{}
 			}).Do()
 		require.EqualError(t, registerResp.Err, "wamp.error.authorization_failed")
 
-		callResp := session.Call("io.xconn.test").Do()
+		callResp := session.Call(testProcedure).Do()
 		require.EqualError(t, callResp.Err, "wamp.error.authorization_failed")
 
-		subscribeResp := session.Subscribe("io.xconn.test", func(event *xconn.Event) {}).Do()
+		subscribeResp := session.Subscribe(testProcedure, func(event *xconn.Event) {}).Do()
 		require.NoError(t, subscribeResp.Err)
 
-		publishResp := session.Publish("io.xconn.test").Acknowledge(true).Do()
+		publishResp := session.Publish(testProcedure).Acknowledge(true).Do()
 		require.NoError(t, publishResp.Err)
 	})
 }
@@ -427,26 +434,26 @@ func TestAutoDiscloseCallerAndPublisher(t *testing.T) {
 	require.NoError(t, err)
 
 	callDetailsCh := make(chan map[string]any, 3)
-	callee.Register("io.xconn.test",
+	callee.Register(testProcedure,
 		func(ctx context.Context, invocation *xconn.Invocation) *xconn.InvocationResult {
 			callDetailsCh <- invocation.Details()
 			return xconn.NewInvocationResult()
 		}).Do()
 
 	publishDetailsCh := make(chan map[string]any, 1)
-	callee.Subscribe("io.xconn.test", func(event *xconn.Event) {
+	callee.Subscribe(testProcedure, func(event *xconn.Event) {
 		publishDetailsCh <- event.Details()
 	}).Do()
 
 	t.Run("Enable", func(t *testing.T) {
 		expectedCallerDetails := map[string]any{"caller": caller.ID(),
-			"caller_authid": caller.Details().AuthID(), "caller_authrole": "trusted", "procedure": "io.xconn.test"}
-		caller.Call("io.xconn.test").Do()
+			"caller_authid": caller.Details().AuthID(), "caller_authrole": roleTrusted, "procedure": testProcedure}
+		caller.Call(testProcedure).Do()
 		require.Equal(t, expectedCallerDetails, <-callDetailsCh)
 
 		expectedPublisherDetails := map[string]any{"publisher": caller.ID(),
-			"publisher_authid": caller.Details().AuthID(), "publisher_authrole": "trusted", "topic": "io.xconn.test"}
-		caller.Publish("io.xconn.test").Do()
+			"publisher_authid": caller.Details().AuthID(), "publisher_authrole": roleTrusted, "topic": testProcedure}
+		caller.Publish(testProcedure).Do()
 		require.Equal(t, expectedPublisherDetails, <-publishDetailsCh)
 	})
 }
@@ -487,7 +494,7 @@ func TestCustomAuthorizer(t *testing.T) {
 
 	t.Run("AllowRegister", func(t *testing.T) {
 		s := createSession("registerRole")
-		resp := s.Register("io.xconn.test", func(ctx context.Context, inv *xconn.Invocation) *xconn.InvocationResult {
+		resp := s.Register(testProcedure, func(ctx context.Context, inv *xconn.Invocation) *xconn.InvocationResult {
 			return xconn.NewInvocationResult()
 		}).Do()
 		require.NoError(t, resp.Err)
@@ -495,7 +502,7 @@ func TestCustomAuthorizer(t *testing.T) {
 
 	t.Run("DenyRegister", func(t *testing.T) {
 		s := createSession("denied")
-		resp := s.Register("io.xconn.test", func(ctx context.Context, inv *xconn.Invocation) *xconn.InvocationResult {
+		resp := s.Register(testProcedure, func(ctx context.Context, inv *xconn.Invocation) *xconn.InvocationResult {
 			return xconn.NewInvocationResult()
 		}).Do()
 		require.EqualError(t, resp.Err, "wamp.error.authorization_failed")
@@ -503,37 +510,37 @@ func TestCustomAuthorizer(t *testing.T) {
 
 	t.Run("AllowCall", func(t *testing.T) {
 		s := createSession("callRole")
-		resp := s.Call("io.xconn.test").Do()
+		resp := s.Call(testProcedure).Do()
 		require.NoError(t, resp.Err)
 	})
 
 	t.Run("DenyCall", func(t *testing.T) {
 		s := createSession("denied")
-		resp := s.Call("io.xconn.test").Do()
+		resp := s.Call(testProcedure).Do()
 		require.EqualError(t, resp.Err, "wamp.error.authorization_failed")
 	})
 
 	t.Run("AllowSubscribe", func(t *testing.T) {
 		s := createSession("subscribeRole")
-		resp := s.Subscribe("io.xconn.test", func(e *xconn.Event) {}).Do()
+		resp := s.Subscribe(testProcedure, func(e *xconn.Event) {}).Do()
 		require.NoError(t, resp.Err)
 	})
 
 	t.Run("DenySubscribe", func(t *testing.T) {
 		s := createSession("denied")
-		resp := s.Subscribe("io.xconn.test", func(e *xconn.Event) {}).Do()
+		resp := s.Subscribe(testProcedure, func(e *xconn.Event) {}).Do()
 		require.EqualError(t, resp.Err, "wamp.error.authorization_failed")
 	})
 
 	t.Run("AllowPublish", func(t *testing.T) {
 		s := createSession("publishRole")
-		resp := s.Publish("io.xconn.test").Acknowledge(true).Do()
+		resp := s.Publish(testProcedure).Acknowledge(true).Do()
 		require.NoError(t, resp.Err)
 	})
 
 	t.Run("DenyPublish", func(t *testing.T) {
 		s := createSession("denied")
-		resp := s.Publish("io.xconn.test").Acknowledge(true).Do()
+		resp := s.Publish(testProcedure).Acknowledge(true).Do()
 		require.EqualError(t, resp.Err, "wamp.error.authorization_failed")
 	})
 }
@@ -598,7 +605,7 @@ func TestBlockedWebSocketClient(t *testing.T) {
 
 func testBlockedSubscriberCaller(t *testing.T, baseSession xconn.BaseSession, session *xconn.Session) {
 	t.Helper()
-	require.NoError(t, baseSession.WriteMessage(messages.NewSubscribe(1, nil, "io.xconn.test")))
+	require.NoError(t, baseSession.WriteMessage(messages.NewSubscribe(1, nil, testProcedure)))
 
 	msg, err := baseSession.ReadMessage()
 	require.NoError(t, err)
@@ -606,7 +613,7 @@ func testBlockedSubscriberCaller(t *testing.T, baseSession xconn.BaseSession, se
 	require.True(t, ok)
 
 	// register a procedure
-	require.NoError(t, baseSession.WriteMessage(messages.NewRegister(1, nil, "io.xconn.test")))
+	require.NoError(t, baseSession.WriteMessage(messages.NewRegister(1, nil, testProcedure)))
 	msg1, err := baseSession.ReadMessage()
 	require.NoError(t, err)
 	_, ok1 := msg1.(*messages.Registered)
@@ -618,12 +625,12 @@ func testBlockedSubscriberCaller(t *testing.T, baseSession xconn.BaseSession, se
 	require.NoError(t, err)
 
 	for i := 0; i < 100; i++ {
-		resp := session.Publish("io.xconn.test").Acknowledge(true).Arg(data).Do()
+		resp := session.Publish(testProcedure).Acknowledge(true).Arg(data).Do()
 		require.NoError(t, resp.Err)
 	}
 
 	// The callee is blocked so the router should respond with an error
-	callResp := session.Call("io.xconn.test").Do()
+	callResp := session.Call(testProcedure).Do()
 	require.EqualError(t, callResp.Err, "wamp.error.network_failure: callee blocked, cannot call procedure")
 }
 
@@ -632,11 +639,11 @@ func initRouterWithRealm1(t *testing.T) *xconn.Router {
 	require.NoError(t, err)
 	require.NoError(t, router.AddRealm("realm1", &xconn.RealmConfig{}))
 	err = router.AddRealmRole("realm1", xconn.RealmRole{
-		Name: "anonymous",
+		Name: roleAnonymous,
 		Permissions: []xconn.Permission{
 			{
 				URI:            "",
-				MatchPolicy:    "prefix",
+				MatchPolicy:    matchPrefix,
 				AllowCall:      true,
 				AllowRegister:  true,
 				AllowPublish:   true,
@@ -654,7 +661,8 @@ func TestBlockedLocalClient(t *testing.T) {
 
 	// subscribe to topic 'io.xconn.test'
 	authID := fmt.Sprintf("%012x", rand.Uint64())[:12] // #nosec
-	baseSession, err := xconn.ConnectInMemoryBase(router, "realm1", authID, "trusted", &serializers.MsgPackSerializer{}, 0)
+	baseSession, err := xconn.ConnectInMemoryBase(router, "realm1", authID, roleTrusted,
+		&serializers.MsgPackSerializer{}, 0)
 	require.NoError(t, err)
 
 	// publisher client
@@ -709,7 +717,7 @@ func blockedCaller(t *testing.T, publishCount int) xconn.BaseSession {
 		auth.NewAnonymousAuthenticator("", nil))
 	require.NoError(t, err)
 
-	require.NoError(t, baseSession.WriteMessage(messages.NewSubscribe(1, nil, "io.xconn.test")))
+	require.NoError(t, baseSession.WriteMessage(messages.NewSubscribe(1, nil, testProcedure)))
 
 	msg, err := baseSession.ReadMessage()
 	require.NoError(t, err)
@@ -721,7 +729,7 @@ func blockedCaller(t *testing.T, publishCount int) xconn.BaseSession {
 	require.NoError(t, err)
 
 	for i := 0; i < publishCount; i++ {
-		resp := client1.Publish("io.xconn.test").Acknowledge(true).Arg(data).Do()
+		resp := client1.Publish(testProcedure).Acknowledge(true).Arg(data).Do()
 		require.NoError(t, resp.Err)
 	}
 
